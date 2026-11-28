@@ -1,8 +1,8 @@
-# LiteCast Studio v1.3.2 — User & Developer Guide
+# LiteCast Studio v1.3.3 — User & Developer Guide
 
 [![CI](https://github.com/evalrjcom/litecast/actions/workflows/ci.yml/badge.svg)](https://github.com/evalrjcom/litecast/actions/workflows/ci.yml)
 
-`litecast_v1.3.2` is a lightweight, OBS-style screen recorder and live streamer written in Rust with an FLTK interface. It ships as one source file (`src/main.rs`) with three crate dependencies (`fltk`, `serde`, `serde_json`), plus `wasapi` and `windows-sys` on Windows only and `libc` on Linux/macOS (local-time log stamps). It drives **ffmpeg** as an external worker for capture and encoding.
+`litecast_v1.3.3` is a lightweight, OBS-style screen recorder and live streamer written in Rust with an FLTK interface. It ships as one source file (`src/main.rs`) with three crate dependencies (`fltk`, `serde`, `serde_json`), plus `wasapi` and `windows-sys` on Windows only and `libc` on Linux/macOS (local-time log stamps). It drives **ffmpeg** as an external worker for capture and encoding.
 
 ---
 
@@ -19,6 +19,7 @@
 | Audio | Mic + desktop (system) audio, mixed. **Windows: native WASAPI capture, on by default, with no Stereo Mix needed.** Other backends: PulseAudio/PipeWire, ALSA, DirectShow, AVFoundation |
 | Audio processing | **Mic compressor + noise gate + rumble filter**, **auto-levelling** of mic and desktop to one loudness target so neither is louder than the other, optional ducking of desktop audio while you talk, master limiter. **Live VU meters** for Mic, Desktop and Master. Audio Mixer dialog (Ctrl+M) |
 | Encoders | libx264, NVENC, QuickSync, AMF, VAAPI, VideoToolbox (whichever your ffmpeg provides) |
+| Look | **Dark theme** by default; Settings → Theme switches to Light (the classic look) or System (follows your Windows, macOS or GNOME setting). Applies instantly, no restart |
 | Extras | PNG screenshot (F12), JSON profiles, headless `--record N` / `--stream N` modes for scheduled or cron use |
 
 \*Hard caps of 64 scenes and 64 sources per scene protect against corrupt profiles.
@@ -80,7 +81,7 @@ litecast [--profile FILE] [--record SECONDS] [--stream SECONDS] [--version] [--h
    - *Media / Image*: use **Browse…**.
    - *Color*: pick a colour; use opacity for tints.
 3. **Arrange** layers in the preview (drag to move, Shift-drag to resize) or type X/Y/W/H and press **Apply**. **Raise/Lower** change z-order. The list shows the top layer first.
-4. **Settings** (Ctrl+,): canvas size, FPS, encoder, bitrate, recording folder and format, stream destinations, audio devices, ffmpeg path.
+4. **Settings** (Ctrl+,): canvas size, FPS, encoder, bitrate, recording folder and format, stream destinations, audio devices, ffmpeg path, and **Theme** (Dark / Light / System).
 5. **Record** (Ctrl+R) and **Stream** (Ctrl+L) run independently and can run at the same time.
 6. **Screenshot** (F12) saves a PNG of the composed canvas to the recording folder.
 7. Profiles auto-save every 15 s when changed, and on exit. Ctrl+S saves now; File → Save As / Load handle other files.
@@ -166,6 +167,7 @@ The mic always passes through an 80 Hz high-pass (desk thumps, rumble). Turn aut
 | Background hiss pumps between words | Lower the gate threshold (e.g. −55 dB) or raise it above the hiss level shown on the Mic meter while you are silent |
 | No audio in recordings (Windows) | Settings → Audio backend `wasapi`, with Mic and Desktop set to `default` (or a device from **Detect devices**). The log shows `[audio] mic: capturing "…"` when it works |
 | Status bar shows `⚠ audio −N ms` / log says *encoder is not keeping up* | The encoder fell more than 1 s behind, so audio was dropped and may drift. Use a faster x264 preset or a hardware encoder, or lower the canvas size/FPS |
+| Log panel too narrow / window too dark or light | Update to 1.3.3 (the Log panel was squeezed since 1.3.0). Settings → Theme picks Dark, Light or System |
 | Recording stops instantly with *Error parsing options for input file pipe:0* | Your ffmpeg is newer than LiteCast ≤ 1.1.0 expected. Update to 1.1.1 or later |
 | Stream keeps reconnecting / ⟳ next to a destination | Check that destination's URL and key; the log shows the redacted ffmpeg error. Rumble keys are per-event, so generate a new one or enable a static key |
 | "ffmpeg lacks RTMPS" on Go Live | Your ffmpeg was built without TLS. Install a full build (distro ffmpeg, gyan.dev or BtbN). Kick needs RTMPS |
@@ -201,7 +203,7 @@ Audio:  mic (WASAPI / ffmpeg helper) ─▶ ring ─▶ HPF ─▶ gate ─▶ c
 
 ### Tests
 ```bash
-DISPLAY=:0 cargo test --release   # 15 unit tests: blending, clipping, sanitising, args, redaction, destinations, migration, pre-flight, audio transport (incl. L/R alignment, NaN guard), DSP (HPF, gate, compressor, auto-level balance, ducking, limiter), v1.3.1 hardening, v1.3.2 efficiency (chunk reuse, drop reporting)
+DISPLAY=:0 cargo test --release   # 16 unit tests: blending, clipping, sanitising, args, redaction, destinations, migration, pre-flight, audio transport (incl. L/R alignment, NaN guard), DSP (HPF, gate, compressor, auto-level balance, ducking, limiter), v1.3.1 hardening, v1.3.2 efficiency (chunk reuse, drop reporting), v1.3.3 theme (whitelist, old-profile default, palette switch)
 ```
 (One test builds a default profile, which queries monitor geometry, so it needs an X display; Xvfb works.)
 
@@ -213,7 +215,7 @@ End-to-end audio check (test-only `lavfi` backend, enabled by `LITECAST_TEST_AUD
 - **Windows** (latest): clippy and release build, which compiles the WASAPI and named-pipe code.
 - Artifacts are `litecast_v<ver>-linux-x86_64.tar.gz` and `litecast_v<ver>-windows-x86_64.zip`, each with a SHA-256 file. Download them from the run page.
 - **Release**: bump `version` in `Cargo.toml` and the version in this README's title, commit, then
-  `git tag v1.3.2 && git push origin v1.3.2`. The tag must match `Cargo.toml`, otherwise CI fails, and the binaries are attached to a GitHub release automatically.
+  `git tag v1.3.3 && git push origin v1.3.3`. The tag must match `Cargo.toml`, otherwise CI fails, and the binaries are attached to a GitHub release automatically.
 
 ### Security model
 - Every child process is spawned with an argv list; no shell is ever invoked.
@@ -236,6 +238,7 @@ Scene transitions (cut only), text sources, filters (chroma key, crop, colour co
 ---
 
 ## 7. Changelog
+- **1.3.3**: dark theme by default, with a new **Settings → Theme** choice: Dark, Light (the pre-1.3.3 look) or System (Windows "app mode", macOS appearance, or GNOME colour scheme; falls back to Dark if the desktop does not say). The change applies live. Fixed the **Log** panel, which had been squeezed to a sliver since 1.3.0: the bottom columns are narrower and log lines now wrap. Section headers are quieter, and the idle Start Recording / Start Streaming buttons are tinted so they stand out. Existing profiles open in Dark; choose Light to keep the old look.
 - **1.3.2**: efficiency release. An empty scene no longer composites every frame: about 33% → 14% of a core at 1080p60. Previews are built only after the window drew the previous one, which roughly halves preview work at 60 fps and stops it while the window is minimised. The audio mixer wakes once per 10 ms block instead of every 3 ms, and audio buffers are reused instead of allocated about 100 times a second. If an encoder falls behind and audio is dropped, the log says so and the status bar shows `⚠ audio −N ms`. Log times are now your local time.
 - **1.3.1**: audit and bug-fix release. Fixes a left/right channel swap that could start after an audio underrun, NaN/inf samples permanently silencing the mix, CPU spikes from denormal floats during silence, and a stop that could hang when the encoder stopped reading audio. Windows `default` devices now follow a change of the default speakers/mic within about 2 s. Recordings and screenshots are always local files. Loading a profile asks before running a different ffmpeg. Stream keys can no longer leak partly at the log line limit. Unreadable profiles are no longer renamed to `.bad`. Negative X11 capture offsets are clamped.
 - **1.3.0**: **audio processing and VU meters**. Mic 80 Hz high-pass, noise gate and soft-knee compressor. **Auto-level** of mic and desktop to one loudness target, so neither is louder or quieter than the other. Optional ducking of desktop under voice. Master −1 dBFS limiter. Live Mic/Desktop/Master meters with peak hold, gain-reduction and auto-gain readouts. **Audio Mixer** dialog (Ctrl+M) with live preview. All backends now use the in-app mixer, so pulse/alsa/dshow no longer lose level to `amix`. New `LITECAST_LOG=1` echoes the log to stderr.

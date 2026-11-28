@@ -1,5 +1,5 @@
 // =============================================================================
-//  litecast_v1.3.2 — LiteCast Studio
+//  litecast_v1.3.3 — LiteCast Studio
 //  A lightweight OBS-style recorder / live streamer in Rust + FLTK.
 //
 //  Architecture (one process, ffmpeg used as an external worker binary):
@@ -25,6 +25,11 @@
 //  Runtime: ffmpeg >= 4.4 on PATH (or set in Settings).
 //
 //  Changelog
+//   1.3.3  UI: dark theme by default, with Settings → Theme (Dark / Light /
+//          System; System follows the Windows, macOS or GNOME preference).
+//          Fixed the Log column being squeezed to ~45 px since 1.3.0 (dock
+//          columns narrowed; log text now wraps). Muted section headers and
+//          tinted idle Record/Stream buttons. Search "v1.3.3" in the source.
 //   1.3.2  Efficiency: empty scenes skip compositing (re-publish one black
 //          frame); previews are built only after the UI drew the last one
 //          (~half the preview work at 60 fps, none while minimised); tall
@@ -138,6 +143,8 @@ const X264_PRESETS: &[&str] = &[
     "medium",
 ];
 const REC_FORMATS: &[&str] = &["mkv", "mp4", "mov", "flv", "ts"];
+/// v1.3.3: UI themes (Settings → Theme).
+const THEMES: &[&str] = &["dark", "light", "system"];
 const AUDIO_APIS: &[&str] = &["none", "wasapi", "pulse", "alsa", "dshow", "avfoundation"];
 /// Backends offered on this OS (wasapi = native Windows capture).
 fn audio_apis_here() -> Vec<&'static str> {
@@ -292,6 +299,8 @@ struct Settings {
     desktop_device: String,
     /// v1.3: mic compressor/gate, auto-level, ducking, limiter.
     audio_dsp: AudioDsp,
+    /// v1.3.3: "dark" (default), "light" (classic) or "system".
+    theme: String,
     ffmpeg_path: String,
     vaapi_device: String,
 }
@@ -332,6 +341,7 @@ impl Default for Settings {
             audio_api: api.into(),
             mic_device: mic.into(),
             desktop_device: desk.into(),
+            theme: "dark".into(),
             audio_dsp: AudioDsp::default(),
             ffmpeg_path: "ffmpeg".into(),
             vaapi_device: "/dev/dri/renderD128".into(),
@@ -512,6 +522,9 @@ fn sanitize(p: &mut Profile) {
     }
     if !REC_FORMATS.contains(&s.rec_format.as_str()) {
         s.rec_format = d.rec_format.clone();
+    }
+    if !THEMES.contains(&s.theme.as_str()) {
+        s.theme = d.theme.clone(); // v1.3.3: whitelist
     }
     migrate_audio(s, cfg!(windows), &d);
     s.audio_dsp.sanitize();
@@ -4076,12 +4089,141 @@ struct Ui {
     src_status: Frame,
     logbuf: TextBuffer,
     logview: TextDisplay,
+    /// v1.3.3: section headers, kept so a theme change can recolour them.
+    headers: Vec<Frame>,
+}
+
+// ----------------------------------------------------------------------------
+// Theme (v1.3.3): one palette for the whole window. Dark matches the preview
+// and meter panels, which were always dark; Light is the classic FLTK look.
+// ----------------------------------------------------------------------------
+static UI_DARK: AtomicBool = AtomicBool::new(true);
+
+fn ui_dark() -> bool {
+    UI_DARK.load(Relaxed)
+}
+
+/// Desktop light/dark preference; None if the desktop does not say.
+#[cfg(windows)]
+fn system_prefers_dark() -> Option<bool> {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+    let w = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let (key, val) = (
+        w(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+        w("AppsUseLightTheme"),
+    );
+    let (mut data, mut size) = (0u32, 4u32);
+    // SAFETY: NUL-terminated wide strings; out-buffer is a u32 of `size` bytes.
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            val.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&mut data as *mut u32).cast(),
+            &mut size,
+        )
+    };
+    (rc == 0).then_some(data == 0) // 0 = apps use dark
+}
+
+#[cfg(target_os = "macos")]
+fn system_prefers_dark() -> Option<bool> {
+    let a = ["read", "-g", "AppleInterfaceStyle"].map(String::from);
+    // The key only exists (= "Dark") in dark mode.
+    run_tool("defaults", &a, None, 256, Duration::from_secs(2), None)
+        .ok()
+        .map(|(o, _, code)| code == Some(0) && String::from_utf8_lossy(&o).contains("Dark"))
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn system_prefers_dark() -> Option<bool> {
+    if let Some(t) = std::env::var_os("GTK_THEME") {
+        return Some(t.to_string_lossy().to_ascii_lowercase().contains("dark"));
+    }
+    let a = ["get", "org.gnome.desktop.interface", "color-scheme"].map(String::from);
+    let (o, _, code) = run_tool("gsettings", &a, None, 256, Duration::from_secs(2), None).ok()?;
+    let v = String::from_utf8_lossy(&o).to_ascii_lowercase();
+    (code == Some(0)).then(|| v.contains("dark"))
+}
+
+/// Set the global FLTK palette for `theme`; returns true if it is dark.
+/// Unknown "system" answers fall back to dark (the app default).
+fn apply_theme(theme: &str) -> bool {
+    let dark = match theme {
+        "light" => false,
+        "system" => system_prefers_dark().unwrap_or(true),
+        _ => true,
+    };
+    UI_DARK.store(dark, Relaxed);
+    if dark {
+        app::background(38, 39, 44); // panels, buttons
+        app::background2(26, 27, 31); // lists, inputs, log
+        app::foreground(222, 224, 230); // text
+        app::set_selection_color(46, 110, 200); // accent
+        app::set_inactive_color(110, 112, 120);
+    } else {
+        // Classic FLTK/GTK-scheme defaults (the pre-1.3.3 look), written as
+        // literals: Color::to_rgb() reads FLTK's static map, not live values.
+        app::background(192, 192, 192);
+        app::background2(255, 255, 255);
+        app::foreground(0, 0, 0);
+        app::set_selection_color(0, 0, 128);
+        app::set_inactive_color(85, 85, 85);
+    }
+    app::set_visible_focus(false); // no dotted focus boxes in either theme
+    dark
+}
+
+/// Per-widget colours that the global palette does not cover.
+struct Pal;
+impl Pal {
+    fn header() -> Color {
+        if ui_dark() {
+            Color::from_rgb(140, 146, 160)
+        } else {
+            Color::from_rgb(55, 58, 66)
+        }
+    }
+    fn status_bg() -> Color {
+        if ui_dark() {
+            Color::from_rgb(22, 23, 27)
+        } else {
+            Color::from_rgb(40, 40, 46)
+        }
+    }
+    fn log_text() -> Color {
+        if ui_dark() {
+            Color::from_rgb(190, 196, 206)
+        } else {
+            Color::Black
+        }
+    }
+    /// Idle Start Recording / Start Streaming: tinted so the two primary
+    /// actions stand out before they are pressed.
+    fn idle_rec() -> Color {
+        if ui_dark() {
+            Color::from_rgb(70, 40, 44)
+        } else {
+            Color::from_rgb(222, 190, 190)
+        }
+    }
+    fn idle_live() -> Color {
+        if ui_dark() {
+            Color::from_rgb(36, 52, 78)
+        } else {
+            Color::from_rgb(190, 205, 228)
+        }
+    }
 }
 
 fn col_header(t: &str) -> Frame {
-    let mut f = Frame::default().with_label(t);
+    // v1.3.3: small, muted, upper-case section headers.
+    let mut f = Frame::default().with_label(&t.to_uppercase());
     f.set_label_font(Font::HelveticaBold);
-    f.set_label_size(13);
+    f.set_label_size(11);
+    f.set_label_color(Pal::header());
     f.set_align(Align::Left | Align::Inside);
     f
 }
@@ -4263,12 +4405,12 @@ fn build_ui(
     r1.end();
     c1.fixed(&r1, 26);
     c1.end();
-    dock.fixed(&c1, 190);
+    dock.fixed(&c1, 165); // v1.3.3: was 190
 
     // Sources column
     let mut c2 = Flex::default().column();
     c2.set_pad(3);
-    let h2 = col_header("Sources (top layer first)");
+    let h2 = col_header("Sources");
     c2.fixed(&h2, 20);
     let mut sources = HoldBrowser::default();
     {
@@ -4291,7 +4433,7 @@ fn build_ui(
     r2.end();
     c2.fixed(&r2, 26);
     c2.end();
-    dock.fixed(&c2, 270);
+    dock.fixed(&c2, 225); // v1.3.3: was 270
 
     // Transform column
     let mut c3 = Flex::default().column();
@@ -4334,7 +4476,7 @@ fn build_ui(
     src_status.set_align(Align::Left | Align::Inside | Align::Wrap | Align::Top);
     src_status.set_label_size(11);
     c3.end();
-    dock.fixed(&c3, 250);
+    dock.fixed(&c3, 235); // v1.3.3: was 250
 
     // Controls column
     let mut c4 = Flex::default().column();
@@ -4355,7 +4497,7 @@ fn build_ui(
     c4.fixed(&b_set, 28);
     Frame::default();
     c4.end();
-    dock.fixed(&c4, 170);
+    dock.fixed(&c4, 160); // v1.3.3: was 170
 
     // Audio column: live VU meters (post-processing) + mixer button.
     let mut ca = Flex::default().column();
@@ -4364,12 +4506,12 @@ fn build_ui(
     ca.fixed(&ha, 20);
     let mut vu = Frame::default();
     vu.set_frame(FrameType::FlatBox);
-    vu.set_color(Color::from_rgb(36, 36, 41));
+    vu.set_color(Color::from_rgb(26, 27, 31));
     {
         let meters = meters.clone();
         vu.draw(move |f| {
             let (x, y, w, h) = (f.x(), f.y(), f.w(), f.h());
-            draw::draw_rect_fill(x, y, w, h, Color::from_rgb(36, 36, 41));
+            draw::draw_rect_fill(x, y, w, h, Color::from_rgb(26, 27, 31));
             let m = lock(&meters).clone();
             let live = m
                 .updated
@@ -4409,7 +4551,7 @@ fn build_ui(
     b_mix.set_callback(q.cb(Msg::AudioMixer));
     ca.fixed(&b_mix, 28);
     ca.end();
-    dock.fixed(&ca, 300);
+    dock.fixed(&ca, 265); // v1.3.3 FIX: was 300 — Log was squeezed to ~45 px
     // ~20 Hz meter refresh, only while the window is visible.
     {
         let mut vu = vu.clone();
@@ -4431,13 +4573,15 @@ fn build_ui(
     logview.set_buffer(logbuf.clone());
     logview.set_text_size(11);
     logview.set_text_font(Font::Courier);
+    logview.set_text_color(Pal::log_text());
+    logview.wrap_mode(fltk::text::WrapMode::AtBounds, 0); // v1.3.3: wrap, no sideways scrolling
     c5.end();
     dock.end();
     main.fixed(&dock, 236);
 
     let mut status = Frame::default();
     status.set_frame(FrameType::FlatBox);
-    status.set_color(Color::from_rgb(40, 40, 46));
+    status.set_color(Pal::status_bg());
     status.set_label_color(Color::from_rgb(220, 220, 220));
     status.set_align(Align::Left | Align::Inside);
     status.set_label_size(12);
@@ -4470,6 +4614,7 @@ fn build_ui(
         src_status,
         logbuf,
         logview,
+        headers: vec![h1, h2, h3, h4, ha, h5],
     }
 }
 
@@ -5442,6 +5587,8 @@ fn settings_dialog(cur: &Settings, ff: &FfInfo) -> Option<Settings> {
     let mut ffbrowse = Button::new(x + 340, r, 90, 26, "Browse…");
     let r = row(26);
     let mut vaapi = Input::new(x, r, 240, 26, "VAAPI device:");
+    // v1.3.3: UI theme, applied live when the dialog is saved.
+    let mut theme = Choice::new(x + 320, r, 110, 26, "Theme:");
     let r = row(46);
     let mut info = Frame::new(20, r, 600, 46, None);
     info.set_align(Align::Left | Align::Inside | Align::Wrap);
@@ -5485,6 +5632,8 @@ fn settings_dialog(cur: &Settings, ff: &FfInfo) -> Option<Settings> {
     ki.set_value(&cur.keyint_sec.to_string());
     recdir.set_value(&cur.rec_dir);
     fmt.add_choice(&REC_FORMATS.join("|"));
+    theme.add_choice("Dark|Light|System");
+    theme.set_value(THEMES.iter().position(|t| *t == cur.theme).unwrap_or(0) as i32);
     fmt.set_value(
         REC_FORMATS
             .iter()
@@ -5622,6 +5771,10 @@ fn settings_dialog(cur: &Settings, ff: &FfInfo) -> Option<Settings> {
         s.rec_format = REC_FORMATS
             .get(fmt.value().max(0) as usize)
             .unwrap_or(&"mkv")
+            .to_string();
+        s.theme = THEMES
+            .get(theme.value().max(0) as usize)
+            .unwrap_or(&"dark")
             .to_string();
         s.audio_api = apis
             .get(api.value().max(0) as usize)
@@ -5872,6 +6025,19 @@ impl AppState {
         let n = self.scene().sources.len();
         (line >= 1 && (line as usize) <= n).then(|| n - line as usize)
     }
+    /// v1.3.3: apply the profile's theme and recolour the widgets that
+    /// carry explicit colours. Runs at startup and after Settings/Load.
+    fn apply_ui_theme(&mut self) {
+        apply_theme(&self.prof.settings.theme);
+        for h in &mut self.ui.headers {
+            h.set_label_color(Pal::header());
+        }
+        self.ui.logview.set_text_color(Pal::log_text());
+        self.ui.status.set_color(Pal::status_bg());
+        self.update_buttons();
+        app::redraw();
+    }
+
     fn update_buttons(&mut self) {
         let rec = self.rec.is_some();
         let live = self.stream.is_some() || self.stream_retry.is_some();
@@ -5884,7 +6050,7 @@ impl AppState {
         b.set_color(if rec {
             Color::from_rgb(200, 50, 50)
         } else {
-            Color::BackGround
+            Pal::idle_rec() // v1.3.3: tinted idle state
         });
         b.set_label_color(if rec { Color::White } else { Color::Foreground });
         let b = &mut self.ui.btn_stream;
@@ -5896,7 +6062,7 @@ impl AppState {
         b.set_color(if live {
             Color::from_rgb(50, 110, 200)
         } else {
-            Color::BackGround
+            Pal::idle_live() // v1.3.3: tinted idle state
         });
         b.set_label_color(if live {
             Color::White
@@ -6659,8 +6825,12 @@ impl AppState {
                     );
                     return;
                 }
+                let theme_changed = ns.theme != cur.theme;
                 self.prof.settings = ns;
                 self.log.set_secrets(secrets_of(&self.prof.settings));
+                if theme_changed {
+                    self.apply_ui_theme(); // v1.3.3: live, no restart
+                }
                 if cur.ffmpeg_path != self.prof.settings.ffmpeg_path {
                     self.ff = detect_ffmpeg(&self.prof.settings.ffmpeg_path);
                     self.log_ff();
@@ -6795,6 +6965,7 @@ impl AppState {
                             self.log_ff();
                         }
                         self.start_pipeline();
+                        self.apply_ui_theme(); // v1.3.3
                         self.refresh_scenes();
                         self.refresh_sources();
                         self.log
@@ -7032,6 +7203,14 @@ fn main() {
     });
     let ov = Arc::new(Mutex::new(Overlay::default()));
     let meters: Arc<Mutex<Meters>> = Arc::default();
+    // v1.3.3: palette must be set before widgets are built.
+    let dark = apply_theme(&prof.settings.theme);
+    if prof.settings.theme == "system" {
+        log.log(format!(
+            "theme: system → {}",
+            if dark { "dark" } else { "light" }
+        ));
+    }
     let mut ui = build_ui(&q, pv.clone(), ov.clone(), meters.clone());
     ui.win.show();
 
@@ -7426,6 +7605,32 @@ mod tests {
             r.q.iter().copied().collect::<Vec<_>>(),
             [0.0, 0.0, -4.0, 0.25]
         );
+    }
+
+    #[test]
+    fn v133_theme() {
+        // Unknown or hostile theme names fall back to the default (dark).
+        let mut p = Profile::default();
+        assert_eq!(p.settings.theme, "dark");
+        p.settings.theme = "solarized\u{0}".into();
+        sanitize(&mut p);
+        assert_eq!(p.settings.theme, "dark");
+        for t in THEMES {
+            p.settings.theme = t.to_string();
+            sanitize(&mut p);
+            assert_eq!(p.settings.theme, *t);
+        }
+        // Older profiles without the field load with the default.
+        let mut j = serde_json::to_value(Profile::default()).unwrap();
+        j["settings"].as_object_mut().unwrap().remove("theme");
+        let old: Profile = serde_json::from_value(j).unwrap();
+        assert_eq!(old.settings.theme, "dark");
+        // Explicit choices resolve without consulting the desktop.
+        assert!(apply_theme("dark") && ui_dark());
+        assert!(!apply_theme("light") && !ui_dark());
+        assert_ne!(Pal::idle_rec().to_rgb(), Pal::idle_live().to_rgb());
+        let _ = apply_theme("system"); // must not panic or hang without a desktop
+        apply_theme("dark");
     }
 
     #[test]

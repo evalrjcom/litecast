@@ -1,6 +1,6 @@
 [package]
 name = "litecast"
-version = "1.3.2"
+version = "1.3.3"
 edition = "2024"
 rust-version = "1.88"
 description = "LiteCast Studio — lightweight OBS-style recorder / streamer (Rust + FLTK + ffmpeg)"
@@ -25,6 +25,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Pipes",
     "Win32_System_IO",
     "Win32_System_SystemInformation", # v1.3.2: GetLocalTime for log stamps
+    "Win32_System_Registry",          # v1.3.3: Windows light/dark preference
 ] }
 
 [profile.release]
