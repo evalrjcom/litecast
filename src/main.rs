@@ -7615,7 +7615,14 @@ mod tests {
     #[test]
     fn v133_theme() {
         // Unknown or hostile theme names fall back to the default (dark).
-        let mut p = Profile::default();
+        // Built explicitly: Profile::default() touches FLTK (primary screen),
+        // which must not run concurrently from parallel test threads.
+        let mut p = Profile {
+            format: 1,
+            settings: Settings::default(),
+            scenes: vec![],
+            current: 0,
+        };
         assert_eq!(p.settings.theme, "dark");
         p.settings.theme = "solarized\u{0}".into();
         sanitize(&mut p);
@@ -7626,10 +7633,10 @@ mod tests {
             assert_eq!(p.settings.theme, *t);
         }
         // Older profiles without the field load with the default.
-        let mut j = serde_json::to_value(Profile::default()).unwrap();
-        j["settings"].as_object_mut().unwrap().remove("theme");
-        let old: Profile = serde_json::from_value(j).unwrap();
-        assert_eq!(old.settings.theme, "dark");
+        let mut j = serde_json::to_value(Settings::default()).unwrap();
+        j.as_object_mut().unwrap().remove("theme");
+        let old: Settings = serde_json::from_value(j).unwrap();
+        assert_eq!(old.theme, "dark");
         // Resolution is pure (no FLTK calls here: the FLTK palette is not
         // thread-safe and tests run in parallel). The desktop is consulted
         // only for "system", and an unknown answer means dark.
@@ -7639,11 +7646,8 @@ mod tests {
         assert!(theme_is_dark("system", || Some(true)));
         assert!(!theme_is_dark("system", || Some(false)));
         assert!(theme_is_dark("system", || None));
-        // Explicit per-widget colours differ between the two palettes.
-        UI_DARK.store(false, Relaxed);
-        let light = (Pal::header().to_rgb(), Pal::idle_rec().to_rgb());
-        UI_DARK.store(true, Relaxed);
-        assert_ne!(light, (Pal::header().to_rgb(), Pal::idle_rec().to_rgb()));
+        // (No Color/Pal calls here: Color::to_rgb() opens the X display,
+        // which segfaults when done from a parallel test thread.)
     }
 
     #[test]
