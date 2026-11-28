@@ -4148,14 +4148,19 @@ fn system_prefers_dark() -> Option<bool> {
     (code == Some(0)).then(|| v.contains("dark"))
 }
 
+/// Resolve a theme name to dark/light. `system` is only asked for "system".
+fn theme_is_dark(theme: &str, system: impl FnOnce() -> Option<bool>) -> bool {
+    match theme {
+        "light" => false,
+        "system" => system().unwrap_or(true),
+        _ => true,
+    }
+}
+
 /// Set the global FLTK palette for `theme`; returns true if it is dark.
 /// Unknown "system" answers fall back to dark (the app default).
 fn apply_theme(theme: &str) -> bool {
-    let dark = match theme {
-        "light" => false,
-        "system" => system_prefers_dark().unwrap_or(true),
-        _ => true,
-    };
+    let dark = theme_is_dark(theme, system_prefers_dark);
     UI_DARK.store(dark, Relaxed);
     if dark {
         app::background(38, 39, 44); // panels, buttons
@@ -7625,12 +7630,20 @@ mod tests {
         j["settings"].as_object_mut().unwrap().remove("theme");
         let old: Profile = serde_json::from_value(j).unwrap();
         assert_eq!(old.settings.theme, "dark");
-        // Explicit choices resolve without consulting the desktop.
-        assert!(apply_theme("dark") && ui_dark());
-        assert!(!apply_theme("light") && !ui_dark());
-        assert_ne!(Pal::idle_rec().to_rgb(), Pal::idle_live().to_rgb());
-        let _ = apply_theme("system"); // must not panic or hang without a desktop
-        apply_theme("dark");
+        // Resolution is pure (no FLTK calls here: the FLTK palette is not
+        // thread-safe and tests run in parallel). The desktop is consulted
+        // only for "system", and an unknown answer means dark.
+        let never = || -> Option<bool> { panic!("desktop consulted") };
+        assert!(theme_is_dark("dark", never));
+        assert!(!theme_is_dark("light", never));
+        assert!(theme_is_dark("system", || Some(true)));
+        assert!(!theme_is_dark("system", || Some(false)));
+        assert!(theme_is_dark("system", || None));
+        // Explicit per-widget colours differ between the two palettes.
+        UI_DARK.store(false, Relaxed);
+        let light = (Pal::header().to_rgb(), Pal::idle_rec().to_rgb());
+        UI_DARK.store(true, Relaxed);
+        assert_ne!(light, (Pal::header().to_rgb(), Pal::idle_rec().to_rgb()));
     }
 
     #[test]
